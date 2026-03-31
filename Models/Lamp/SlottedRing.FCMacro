@@ -1,0 +1,131 @@
+# -*- coding: utf-8 -*-
+"""
+Slotted Ring (parametric FeaturePython object)
+
+Parameters:
+- OuterDia (mm)
+- InnerDia (mm)
+- Thickness (mm)
+- SlitCount (int)
+- SlitWidth (mm)
+- SlitLength (mm)
+- SlitAngle (deg, measured from tangent; 0 = tangential slot)
+
+Usage:
+1) Open FreeCAD, go to Macro → Macros → Create, paste this file content, save e.g. as SlottedRing.FCMacro.
+2) Run the macro: it will add a new object "SlottedRing" to the active document.
+3) Select the object in the tree and tweak properties in the Data tab; the shape recomputes instantly.
+
+Notes:
+- The object is built with Part booleans, so it exports cleanly to STEP/STL/DXF (via a 2D projection).
+- Slots are rectangular prisms cut through the ring; angle is relative to the local tangent at the placement angle 0° (point on +X axis).
+"""
+
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import math
+
+class SlottedRingFP:
+    def __init__(self, obj):
+        obj.Proxy = self
+        self.initProperties(obj)
+
+    # ---- properties ----
+    def initProperties(self, obj):
+        add = obj.addProperty
+        add("App::PropertyLength",  "OuterDia",   "Base", "Outer diameter of the ring").OuterDia = 200.0
+        add("App::PropertyLength",  "InnerDia",   "Base", "Inner diameter of the ring").InnerDia = 150.0
+        add("App::PropertyLength",  "Thickness",  "Base", "Thickness of the ring (Z)").Thickness = 3.0
+        add("App::PropertyInteger", "SlitCount",  "Slots", "Number of slits around the ring").SlitCount = 16
+        add("App::PropertyLength",  "SlitWidth",  "Slots", "Slot width (radial)").SlitWidth = 6.0
+        add("App::PropertyLength",  "SlitLength", "Slots", "Slot length (tangential)").SlitLength = 25.0
+        add("App::PropertyAngle",   "SlitAngle",  "Slots", "Angle from tangent (deg)").SlitAngle = 25.0
+        add("App::PropertyAngle",   "StartAngle", "Slots", "Starting polar angle of first slot (deg)").StartAngle = 0.0
+        add("App::PropertyBool",    "Unify",      "Advanced", "Fuse slit cutters before boolean (slower, but robust)").Unify = True
+
+    # ---- helper: build single slot cutter at angle=0° ----
+    def _make_base_slot(self, obj):
+        od = float(obj.OuterDia)
+        idd = float(obj.InnerDia)
+        t  = float(obj.Thickness)
+        w  = float(obj.SlitWidth)
+        L  = float(obj.SlitLength)
+        a_deg = float(obj.SlitAngle)
+
+        # mid radius where the slot is centered
+        rc = 0.5 * (od * 0.5 + idd * 0.5)  # = (OD/2 + ID/2) / 2 = (OD+ID)/4
+
+        # Make a rectangular prism box: X=width (radial), Y=length (tangential), Z=thickness
+        # Slightly exceed thickness to guarantee clean cut
+        slot_h = t * 1.1
+        box = Part.makeBox(w, L, slot_h)
+
+        # Place the box so that its center is at (rc, 0, t/2)
+        box.translate(App.Vector(rc - w/2.0, -L/2.0, (t - slot_h)/2.0))
+
+        # Rotate about its center around Z by SlitAngle (0° = tangent)
+        center = App.Vector(rc, 0.0, t/2.0)
+        box.rotate(center, App.Vector(0,0,1), a_deg)
+        return box
+
+    # ---- recompute shape ----
+    def execute(self, obj):
+        od = float(obj.OuterDia)
+        idd = float(obj.InnerDia)
+        t  = float(obj.Thickness)
+        n  = int(obj.SlitCount)
+        start = float(obj.StartAngle)
+
+        # basic validations
+        if od <= idd + 0.1:
+            raise ValueError("OuterDia must be greater than InnerDia")
+        if n < 1:
+            raise ValueError("SlitCount must be >= 1")
+
+        # Ring (outer cylinder minus inner cylinder)
+        outer = Part.makeCylinder(od/2.0, t)
+        inner = Part.makeCylinder(idd/2.0, t)
+        ring = outer.cut(inner)
+
+        # Build cutters: rotate one base slot around Z, n times
+        base_slot = self._make_base_slot(obj)
+        cutters = []
+        step = 360.0 / n
+        for i in range(n):
+            ang = start + i * step
+            s = base_slot.copy()
+            s.rotate(App.Vector(0,0,0), App.Vector(0,0,1), ang)
+            cutters.append(s)
+
+        if obj.Unify and len(cutters) > 1:
+            # Fuse all cutters into one (slower but more stable for boolean)
+            fused = cutters[0]
+            for c in cutters[1:]:
+                fused = fused.fuse(c)
+            result = ring.cut(fused)
+        else:
+            # Cut sequentially
+            result = ring
+            for c in cutters:
+                result = result.cut(c)
+
+        result = result.removeSplitter()  # cleaner edges
+        obj.Shape = result
+
+
+def makeSlottedRing(name="SlottedRing"):
+    doc = App.ActiveDocument or App.newDocument("SlottedRing")
+    obj = doc.addObject("Part::FeaturePython", name)
+    SlottedRingFP(obj)
+    obj.ViewObject.Proxy = 0  # default view provider
+    doc.recompute()
+    try:
+        Gui.ActiveDocument.getObject(obj.Name).ShapeColor = (0.6, 0.4, 0.2)
+    except Exception:
+        pass
+    return obj
+
+# Auto-create one instance when the macro runs
+if __name__ == "__main__":
+    makeSlottedRing()
